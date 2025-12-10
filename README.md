@@ -50,6 +50,27 @@ Server runs at http://localhost:3000
   - PUT `/api/users/:id` `{ email?, name? }`
   - DELETE `/api/users/:id`
 
+### RAG (Hugging Face)
+
+- POST `/api/rag/query` `{ question: "..." }`
+  - Builds context from stored users (name, email, createdAt), ranks with embeddings, and answers via HF chat completion.
+  - Response shape: `{ answer, context, meta: { generationModel, embeddingModel, hits: [{ id, score }] } }`
+
+Setup for AI:
+
+1. Get a free personal token from https://huggingface.co/settings/tokens and set `HF_ACCESS_TOKEN` in `.env`.
+2. Optional overrides:
+   - `HF_GENERATION_MODEL` (default: `HuggingFaceH4/zephyr-7b-beta`)
+   - `HF_EMBEDDING_MODEL` (default: `sentence-transformers/all-MiniLM-L6-v2`)
+
+Example request:
+
+```bash
+curl -X POST http://localhost:3000/api/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "List recent users"}'
+```
+
 ## Notes
 
 - This project is configured for Prisma v7 (requires Node 20.19+). The connection string is configured in `prisma.config.ts` as `datasource.url` (not in `schema.prisma`).

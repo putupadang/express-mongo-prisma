@@ -11,6 +11,7 @@
     "db:push": "prisma db push"
   },
   "dependencies": {
+    "@huggingface/inference": "^4.13.5",
     "@prisma/client": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
