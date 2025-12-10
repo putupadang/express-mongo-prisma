@@ -1,46 +1,45 @@
 const { PrismaClient } = require("@prisma/client");
+const { InferenceClient } = require("@huggingface/inference");
+const { MemoryVectorStore } = require("langchain/vectorstores/memory");
 const {
-  embedText,
-  generateAnswer,
-  embeddingModel,
-  generationModel,
-} = require("../lib/ai");
+  HFTransformersEmbeddings,
+} = require("@langchain/community/embeddings/hf_transformers");
+const { ChatHuggingFace } = require("@langchain/community/chat_models/hf");
+const { RunnableSequence } = require("langchain/runnables");
+const { formatDocumentsAsString } = require("langchain/util/document");
+const { ChatPromptTemplate } = require("@langchain/core/prompts");
 
 const prisma = new PrismaClient();
+const hfToken = process.env.HF_ACCESS_TOKEN;
+const generationModel =
+  process.env.HF_GENERATION_MODEL || "HuggingFaceH4/zephyr-7b-beta";
+const embeddingModel =
+  process.env.HF_EMBEDDING_MODEL || "sentence-transformers/all-MiniLM-L6-v2";
 
-function cosineSimilarity(a, b) {
-  if (!a || !b || a.length !== b.length) return -1;
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? -1 : dot / denom;
-}
+const hfClient = new InferenceClient(hfToken);
+const llm = new ChatHuggingFace({
+  inferenceClient: hfClient,
+  model: generationModel,
+  maxTokens: 256,
+  temperature: 0.2,
+});
 
-async function buildUserContext() {
+const embedder = new HFTransformersEmbeddings({
+  model: embeddingModel,
+  accessToken: hfToken,
+});
+
+async function buildUserDocuments() {
   const users = await prisma.user.findMany({
     orderBy: { createdAt: "desc" },
   });
-  const docs = users.map((u) => ({
-    id: u.id,
-    text: `User ${u.id}\nName: ${u.name || "N/A"}\nEmail: ${
+
+  return users.map((u) => ({
+    pageContent: `User ${u.id}\nName: ${u.name || "N/A"}\nEmail: ${
       u.email
     }\nCreated: ${u.createdAt}`,
+    metadata: { id: u.id, email: u.email },
   }));
-
-  const vectors = [];
-  for (const doc of docs) {
-    // eslint-disable-next-line no-await-in-loop
-    const embedding = await embedText(doc.text);
-    vectors.push({ ...doc, embedding });
-  }
-
-  return vectors;
 }
 
 module.exports = {
@@ -51,45 +50,57 @@ module.exports = {
         return res.status(400).json({ message: "question is required" });
       }
 
-      if (!process.env.HF_ACCESS_TOKEN) {
+      if (!hfToken) {
         return res.status(500).json({
           message:
             "HF_ACCESS_TOKEN is missing. Set it in your environment to enable AI features.",
         });
       }
 
-      const docs = await buildUserContext();
-      if (!docs.length) {
+      const userDocs = await buildUserDocuments();
+      if (!userDocs.length) {
         return res
           .status(404)
           .json({ message: "No user data available for retrieval." });
       }
 
-      const questionEmbedding = await embedText(question);
+      const vectorStore = await MemoryVectorStore.fromDocuments(
+        userDocs,
+        embedder
+      );
 
-      const ranked = docs
-        .map((doc) => ({
-          ...doc,
-          score: cosineSimilarity(questionEmbedding, doc.embedding),
-        }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3);
+      const retriever = vectorStore.asRetriever({ k: 3 });
 
-      const context = ranked
-        .map(
-          (r, idx) => `#${idx + 1} (score ${r.score.toFixed(3)}):\n${r.text}`
-        )
-        .join("\n\n");
+      const prompt = ChatPromptTemplate.fromMessages([
+        [
+          "system",
+          "You are a helpful assistant that answers ONLY using the supplied context. If the context is insufficient, say you do not know.",
+        ],
+        [
+          "user",
+          "Context:\n{context}\n\nQuestion: {question}\nAnswer using only the context above.",
+        ],
+      ]);
 
-      const answer = await generateAnswer(question, context);
+      const chain = RunnableSequence.from([
+        {
+          context: async (input) => {
+            const docs = await retriever.getRelevantDocuments(input.question);
+            return formatDocumentsAsString(docs);
+          },
+          question: (input) => input.question,
+        },
+        prompt,
+        llm,
+      ]);
+
+      const result = await chain.invoke({ question });
 
       return res.json({
-        answer,
-        context,
+        answer: result.content?.trim?.() || result.content || "",
         meta: {
           generationModel,
           embeddingModel,
-          hits: ranked.map(({ id, score }) => ({ id, score })),
         },
       });
     } catch (e) {
